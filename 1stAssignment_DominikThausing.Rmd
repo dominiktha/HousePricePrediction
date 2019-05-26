@@ -1,0 +1,667 @@
+---
+title: "House Price Prediction"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+author: Dominik Thausing | Advanced R | MBD
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(data.table)
+library(plyr)
+library(dplyr)     
+library(png)       
+library(knitr)     
+library(moments)   
+library(e1071)     
+library(caret)     
+library(geosphere)
+library(leaflet)
+
+source('../Dominik_Thausing_Project/splitdf.R')
+source('../Dominik_Thausing_Project/regression_metrics.R')
+```
+
+
+# Introduction
+
+In this assignment the objective is to predict house prices with a given set of variables. The approach will be structured in the following three basic chapters:
+
+- Data Reading and preparation
+- Data Cleaning
+- Exploratory Data Analysis (EDA)
+- Outliers
+- Skewness
+- Baseline Model
+- Feature Engineering
+- Train, Validation Split
+- Modeling
+- Optimization
+- Best Model
+- Final Submission
+
+<hr />
+# Data Reading and preparation
+
+In a first step I will import both, training and test data, and provide a basic overview. Also we already add a column "price" to the test dataset and reorder accordingly to be able to stack in the next step. As we can see, both datasets have 21 columns and in 17277 and 4320 rows, respectively.
+```{r}
+train <- read.csv("../Dominik_Thausing_Project/house_price_train.csv", sep = ",", dec = ".")
+test <- read.csv("../Dominik_Thausing_Project/house_price_test.csv", sep = ",", dec = ".")
+
+test$price <- NA
+test <- test[,colnames(train)]
+
+dim(train)
+dim(test)
+```
+
+Now I can stack the two datasets and start doing the EDA. There are no missing values, only for the price variable, which is obvious, as I haven't predicted yet.
+```{r}
+dataset <- rbind(train, test)
+
+na.cols <- which(colSums(is.na(dataset)) > 0)
+paste('There are', length(na.cols), 'columns with missing values')
+sort(colSums(sapply(dataset[na.cols], is.na)), decreasing = TRUE)
+```
+
+Let's now visualize the dataset to get a first overview:
+```{r}
+summary(dataset)
+```
+
+<hr />
+# Data Cleaning
+
+Before I start with the EDA, I remove meaningless features. For now this is only the column "id", but keep the ids stored as I need them later for the test set.
+```{r}
+id_train <- train$id
+id_test <- test$id
+
+dataset <- dataset[,-which(names(dataset) == "id")]
+```
+
+Next we want to check whether the variables have the correct type:
+```{r}
+str(dataset)
+```
+
+Therefore the following varibale have to be changed to categorical variables: "waterfront", "view", "condition", "grade" and "zipcode". Let's do this as with a for loop. 
+```{r}
+to_categorical <- c("waterfront", "view", "condition", "grade", "zipcode", "yr_built")
+
+for (column in to_categorical) {
+  dataset[ ,column] <- as.factor(dataset[ ,column])
+}
+
+str(dataset)
+
+```
+
+<hr />
+# Exploratory Data Analysis (EDA)
+In the following I will explore the dataset, before performing further transformations. Whenever possible I will use graphs to support findings.
+
+## Target Variable Distribution
+
+First lets see the distribution of the target variable (price):
+```{r}
+variables <- split(names(dataset),sapply(dataset, function(x) paste(class(x),
+                                                                    collapse=" ")))
+
+for(variable in variables$numeric){
+
+  plot(dataset$price, dataset[,variable], main = paste("Scatterplot: Price vs",variable),
+     xlab = "Price", ylab = variable,
+     pch = 19, frame = FALSE)
+  abline(lm(dataset[,variable] ~ dataset$price, data = dataset), col = "blue")
+  
+}
+```
+
+## Bar Plots for Categorical Variables
+
+Next I create bar plots for all categorical variables:
+```{r}
+for(variable in variables$factor){
+  counts <- table(dataset[,variable])
+  barplot(counts, main = variable)
+}
+```
+
+## Histograms for Numerical Variables
+
+An histograms for numerical variables:
+```{r}
+for(variable in variables$numeric){
+  hist(dataset[,variable], main=variable)
+}
+```
+
+## Geograpical distribution
+
+And finally lets have a look at the geographical distribution.
+```{r, echo=FALSE}
+x <- dataset[!is.na(dataset$price),]
+p1 = ggplot(x[x$lat != 0 & x$long != 0,], aes(x = long, y = lat, color = price)) + geom_point()
+
+p1
+```
+
+```{r}
+map <- leaflet(dataset)  %>% addTiles() %>% addCircleMarkers(~long, ~lat, popup = ~as.character(price), radius =1);
+map
+```
+
+<hr />
+# Outliers
+
+To detect outliers I will first create boxplots for all numeric columns. To identify thes I use a for loop.
+```{r}
+num_columns_large <- c()
+num_columns_med <- c()
+num_columns_small <- c()
+
+dataset1 <- dataset[,-which(names(dataset) %in% c("price"))]
+
+for (column in colnames(dataset1)) {
+  
+  if(is.numeric(dataset1[1,column]) | is.integer(dataset1[1,column])){
+    
+    if(max(abs(dataset1[,column]))<40){
+    num_columns_small <- c(num_columns_small, column)
+    }
+    
+    if(max(abs(dataset1[,column]))>=40 && max(abs(dataset1[,column]))<1000){
+    num_columns_med <- c(num_columns_med, column)
+    }
+    
+    if(max(abs(dataset1[,column]))>=1000){
+    num_columns_large <- c(num_columns_large, column)
+    }
+    
+  }
+  
+}
+
+num_columns_small
+num_columns_med
+num_columns_large
+```
+
+## Boxloting the small numeric columns:
+Here there is only one outlier for the variable bedrooms. 
+```{r}
+boxplot(dataset[,num_columns_small])
+```
+
+It seems, that only "bedrooms" has one very significant outlier, which I will change to the mean:
+```{r}
+dataset[dataset$bedrooms==max(dataset$bedrooms),]
+dataset[14548, "bedrooms"] <- round(mean(dataset$bedrooms),0)
+```
+
+## Boxloting the medium numeric columns
+Just to check whether there are houses which are in a completely different geographical area, which is not the case.
+```{r}
+boxplot(dataset[,num_columns_med])
+```
+
+
+## Boxloting the large numeric columns
+```{r}
+boxplot(dataset[,num_columns_large])
+```
+
+The significant outliers are in "sqft_lot" and "sqft_lot15" which show the size of the land lot in SF, as I am sure that there are houses with very large land lots, I will accept these values.
+
+<hr />
+# Skewness
+
+In the next step I will inspect skewness in the target variable and plot it with ggplot and check whether taking the log will remove skewness.
+```{r}
+df <- rbind(data.frame(version="price",x=dataset$price),
+            data.frame(version="log(price+1)",x=log(dataset$price + 1)))
+
+ggplot(data=df) +
+  facet_wrap(~version,ncol=2,scales="free_x") +
+  geom_histogram(aes(x=x), bins = 50)
+```
+
+I therefore transform the target value applying log:
+```{r}
+# Log transform the target for official scoring
+dataset$price <- log1p(dataset$price)
+```
+
+As skewness could also affect other variables, I will transform variables that surpass a certain threshold. I will set up my threshold for the skewness in 0.75. 
+```{r}
+skewness_threshold = 0.75
+```
+
+With the following function I check the skwness and transform numeric variables that surpass the threshold:
+```{r}
+
+column_types <- sapply(names(dataset), function(x) {
+    class(dataset[[x]])
+  }
+)
+numeric_columns <- names(column_types[column_types != "factor"])
+remove <- c("lat", "long")
+numeric_columns <- numeric_columns[! numeric_columns %in% remove]
+numeric_columns
+```
+
+And now the actual skewness:
+```{r}
+# skew of each variable
+skew <- sapply(numeric_columns, function(x) { 
+    e1071::skewness(dataset[[x]], na.rm = T)
+  }
+)
+
+skew
+```
+
+
+And the transformation:
+```{r}
+# transform all variables above a threshold skewness
+skew <- skew[abs(skew) > skewness_threshold]
+for(x in names(skew)) {
+  dataset[[x]] <- log(dataset[[x]] + 1)
+}
+```
+
+<hr />
+# Baseline Model
+Before starting the Feature engeneering process I will get an initial baseline score with a lm and svm model.
+```{r}
+# get train data and drop date
+train_base <- dataset[!is.na(dataset$price),]
+train_base <- train_base[,-which(names(train_base) %in% c("date"))]
+
+# split dataset
+train_base_split <- splitdf(train_base, seed = 1333, percentage = 0.7)
+
+# fit base lm model model and predict
+base_model_lm <- lm(formula = price~., data = train_base_split$trainset)
+preds_base <- as.numeric(exp(predict(base_model_lm , newdata =
+                                       train_base_split$testset))-1)
+
+# get base mape
+mape_base <- mape(real = as.numeric(exp(train_base_split$testset$price)-1),
+                  preds_base)
+
+# create a dataframe for all mapes
+MAPEs <- data.frame("Model" = "base_model_lm", "MAPE" = mape_base)
+
+# fit base svm model model and predict
+base_model_svm <- svm(formula = price~., data = train_base_split$trainset,
+                      kernel="radial")
+predictions_train_svm <- as.numeric(exp(predict(base_model_svm, newdata =
+                                                  train_base_split$testset))-1)
+
+# add base mape to dataframe
+mape_base_svm <- mape(real = as.numeric(exp(train_base_split$testset$price)-1),
+                      predictions_train_svm)
+MAPEs <- rbind(MAPEs, data.frame("Model" = "base_model_svm", "MAPE" =
+                                   mape_base_svm))
+
+MAPEs
+```
+
+<hr />
+# Feature Engeneering
+
+In this step I create features from the features I have available.
+```{r}
+# adding the total number of rooms
+dataset$TotalRooms <- as.numeric(exp(dataset$bedrooms)-1) + dataset$bathrooms
+
+# add renovated, yes / no (added initially, but every house was renovated, so useless)
+# dataset$Renov <- ifelse(dataset$yr_built==dataset$yr_renovated, 0, 1)
+
+# add age of house
+dataset$Age <- 2019-as.numeric(dataset$yr_built)-1899
+
+# add total SF
+dataset$TotalSqFeet <- dataset$sqft_above + dataset$sqft_basement 
+
+# add SF per room
+dataset$SFperRoom <- dataset$TotalSqFeet / dataset$TotalRooms
+
+# add "distance" variable which computes the distance of every house to a fixed point (0,0 in my case).
+dataset$distance <- distGeo(as.matrix(dataset[,c('long','lat')]), c(0,0))
+
+# add days since recorded
+dataset$date <- as.Date(strptime(dataset$date, format = "%m/%d/%Y"))
+dataset$DaysSinceRec <- as.numeric(Sys.Date() - dataset$date)
+
+# add combination of condition and grade
+dataset$Rating <- as.factor(round((as.numeric(dataset$condition) +
+                                     as.numeric(dataset$grade))/2 ,digits = 0))
+
+# add basement, yes / no
+dataset$Basement <- as.factor(ifelse(dataset$sqft_basement==0, 0, 1))
+
+head(dataset)
+```
+
+Finally I will drop features which aren't needed anymore
+```{r}
+# drop "date"
+dataset <- dataset[,-which(names(dataset) %in% c("date"))]
+
+head(dataset)
+```
+
+<hr />
+# Train, Validation Spliting
+
+After cleaning and feature engeneering is done, I will now use the training set, split it and evaluate the best model to predict the unknown prices.
+```{r}
+train <- dataset[!is.na(dataset$price),]
+
+# split dataset
+split <- splitdf(train, seed = 1333, percentage = 0.7)
+
+training <- split$trainset
+validation <- split$testset
+```
+
+<hr />
+# Modeling
+Before I have already tried lm and svm, now lets see how their score changed after feature engeenering and als have a look at other models
+
+## Linear Regression
+
+Lets train and predict with lm model. As we can see the lm model improved by a little bit.
+```{r}
+# fit lm model model and predict
+model_lm <- lm(formula = price~., data = training)
+preds_lm <- as.numeric(exp(predict(model_lm , newdata = validation))-1)
+
+# get mape
+mape_lm <- mape(real = as.numeric(exp(validation$price)-1), preds_lm)
+
+MAPEs <- rbind(MAPEs, data.frame("Model" = "model_lm", "MAPE" = mape_lm))
+MAPEs
+```
+
+## SVM
+
+Also the svm model improved slightly.
+```{r}
+# fit base svm model model and predict
+model_svm <- svm(formula = price~., data = training, kernel="radial")
+preds_svm <- as.numeric(exp(predict(model_svm, newdata = validation))-1)
+
+# add base mape to dataframe
+mape_svm <- mape(real = as.numeric(exp(validation$price)-1), preds_svm)
+MAPEs <- rbind(MAPEs, data.frame("Model" = "model_svm", "MAPE" = mape_svm))
+
+MAPEs
+```
+
+## Tree based models: Rpart
+
+Lets try rpart as the first tree based model. Compared to my baseline scores the performance is not very good.
+```{r}
+library(rpart)
+
+# fit tree model model and predict
+tree0 <- rpart(formula = price ~., data = training, method = 'anova', model=TRUE, cp=0)
+preds_tree0 <- as.numeric(exp(predict(tree0 , newdata = validation))-1)
+
+# get mape
+mape_tree0 <- mape(real = as.numeric(exp(validation$price)-1), preds_tree0)
+
+MAPEs <- rbind(MAPEs, data.frame("Model" = "model_tree0", "MAPE" = mape_tree0))
+MAPEs
+
+```
+
+## Tree based models: Ranger
+
+Next I try ranger, which so far achieves the best score.
+```{r}
+library(ranger)
+
+# fit tree model model and predict
+tree1 <- ranger(formula = price ~., data = training)
+preds_tree1 <- predict(tree1,validation)
+preds_tree1 <- as.numeric(exp(preds_tree1$predictions)-1)
+
+# get mape
+mape_tree1 <- mape(real = as.numeric(exp(validation$price)-1), preds_tree1)
+
+MAPEs <- rbind(MAPEs, data.frame("Model" = "model_tree1", "MAPE" = mape_tree1))
+MAPEs
+
+```
+
+## Tree based models: RandomForest
+
+Additionally I am trying RandomForest, which does not perform (comparably) well and takes a long time.
+```{r}
+library(randomForest)
+
+formula = formula(price ~ bedrooms + bathrooms + sqft_living + sqft_lot + floors + waterfront + view + condition + grade + sqft_above + sqft_basement + sqft_living15 + sqft_lot15 + TotalRooms + Age + TotalSqFeet + SFperRoom + distance + DaysSinceRec + Rating + Basement)
+
+# fit tree model model and predict
+tree2 <- randomForest(formula = formula, data = training)
+preds_tree2 <- predict(tree2,validation)
+preds_tree2 <- as.numeric(exp(preds_tree2)-1)
+
+# get mape
+mape_tree2 <- mape(real = as.numeric(exp(validation$price)-1), preds_tree2)
+
+MAPEs <- rbind(MAPEs, data.frame("Model" = "model_tree2", "MAPE" = mape_tree2))
+MAPEs
+
+```
+
+
+## XGBoost
+
+Next I am trying the perfomance of XGBoost, which so far has the best mape!
+```{r}
+library(xgboost)
+
+# dummify
+dataset_dummy<-caret::dummyVars(formula= ~., data = dataset, fullRank=T,sep = "_")
+dataset_dummy<-data.table(predict(dataset_dummy, newdata = dataset))
+
+names(dataset_dummy)<-gsub('-','_',names(dataset_dummy))
+
+train_dummy <- dataset_dummy[!is.na(dataset_dummy$price),]
+
+# split dummified dataset
+split <- splitdf(train_dummy, seed = 1333, percentage = 0.7)
+
+training_dummy <- split$trainset
+validation_dummy <- split$testset
+
+xgb_0<-xgboost(booster='gbtree',
+               data=as.matrix(training_dummy[, !'price', with=F]),
+               label=training_dummy$price,
+               nrounds = 100,
+               objective='reg:linear')
+
+preds_xgb0 <- predict(xgb_0, newdata = as.matrix(validation_dummy[, !'price',
+                                                                  with=F]),
+                      type='response')
+
+preds_xgb0 <- as.numeric(exp(preds_xgb0)-1)
+
+# get mape
+mape_xgb0 <- mape(real = as.numeric(exp(validation_dummy$price)-1), preds_xgb0)
+
+MAPEs <- rbind(MAPEs, data.frame("Model" = "model_xgb0", "MAPE" = mape_xgb0))
+MAPEs
+
+
+```
+
+## XGBoost linear
+
+Lets also try XGBoost linear, which does not perform well.
+```{r}
+
+xgb_1<-xgboost(booster='gblinear',
+               data=as.matrix(training_dummy[, !'price', with=F]),
+               label=training_dummy$price,
+               nrounds = 100,
+               objective='reg:linear')
+
+preds_xgb1 <- predict(xgb_1, newdata = as.matrix(validation_dummy[, !'price', with=F]),
+                      type='response')
+
+preds_xgb1 <- as.numeric(exp(preds_xgb1)-1)
+
+# get mape
+mape_xgb1 <- mape(real = as.numeric(exp(validation_dummy$price)-1), preds_xgb1)
+
+MAPEs <- rbind(MAPEs, data.frame("Model" = "model_xgb1", "MAPE" = mape_xgb1))
+MAPEs
+
+
+```
+
+<hr />
+# Optimization
+
+I will optimze 'model_tree1' (ranger) and 'model_xgb0' (XGBoost), because they achieve the best scores.
+
+## Ranger Optimization
+
+I define the grid an train it.
+```{r}
+param_grid_ranger <- expand.grid(
+  mtry = c(3,4,5),
+  splitrule = c("extratrees", "variance"),
+  min.node.size = c(3,5)
+)
+
+ranger_control <- trainControl(
+  method="cv",
+  number = 5
+)
+
+model_ranger_tuned <- train(price~., data=training, trControl=ranger_control,
+                        tuneGrid=param_grid_ranger, method="ranger")
+```
+
+Lets have a look at the best parameters.
+```{r}
+model_ranger_tuned$bestTune
+```
+
+And use the best model to predict. As we can see, the performance improved slightly.
+```{r}
+# predict with final model
+model_ranger_tuned1 <- ranger(formula = price ~., data = training, mtry = 5,
+                             splitrule = "variance", min.node.size = 3)
+preds_ranger_opt <- predict(model_ranger_tuned1, validation)
+preds_ranger_opt <- as.numeric(exp(preds_ranger_opt$predictions)-1)
+
+# get mape
+mape_ranger_opt <- mape(real = as.numeric(exp(validation$price)-1),
+                        preds_ranger_opt)
+
+MAPEs <- rbind(MAPEs, data.frame("Model" = "model_ranger_tuned", "MAPE" =
+                                   mape_ranger_opt))
+MAPEs
+```
+
+
+## XGBoost Optimization
+
+Next I will optimize XGBoost. As the complete grid search took a long time, I just display the layout and the final paramaters used. 
+```{r}
+param_grid <- expand.grid(
+  nrounds = 3000,
+  eta = 0.07,
+  subsample = 1,
+  colsample_bytree = 0.28,
+  max_depth = 3,
+  gamma = 0.005,
+  min_child_weight = 1
+)
+
+xgb_control <- trainControl(
+  method="cv",
+  number = 3
+)
+
+model_xgb0_tuned <- train(price~., data=training_dummy, trControl=xgb_control,
+                        tuneGrid=param_grid, lambda=0, method="xgbTree")
+```
+
+Lets have a look at the best parameters.
+```{r}
+model_xgb0_tuned$bestTune
+```
+
+And use the best model to predict.
+```{r}
+# predict
+preds_xgb0_opt <- predict(model_xgb0_tuned$finalModel, newdata = as.matrix(validation_dummy[, !'price', with=F]))
+
+preds_xgb0_opt <- as.numeric(exp(preds_xgb0_opt)-1)
+
+# get mape
+mape_xgb0_opt <- mape(real = as.numeric(exp(validation_dummy$price)-1),
+                      preds_xgb0_opt)
+
+MAPEs <- rbind(MAPEs, data.frame("Model" = "model_xgb0_tuned", "MAPE" =
+                                   mape_xgb0_opt))
+MAPEs
+```
+
+<hr />
+# Best model
+
+For the best model (XBoost optimized) I will plot the predictions:
+```{r}
+plot(as.numeric(exp(validation_dummy$price)-1), preds_xgb0_opt, main = "Scatterplot: Real prices vs predictions",
+     xlab = "Real prices", ylab = "Predictions",
+     pch = 19, frame = FALSE)
+  abline(lm(preds_ranger_opt ~ as.numeric(exp(validation_dummy$price)-1), data = dataset), col = "blue")
+```  
+
+My best model score a MAPE of on the validation set was achieved with the tuned XGBoost model and scored a MAPE of 11.49%.
+```{r}
+
+MAPEs <- MAPEs[order(MAPEs$MAPE),]
+MAPEs
+
+```
+
+
+<hr />
+# Final Submission
+
+Finally I will use the best model (based on MAPE) to predict the prices for the test set and write it to a csv.
+```{r}
+# dummify test data
+test_data <- dataset[is.na(dataset$price),]
+
+test_data_dummy<-caret::dummyVars(formula= ~., data = test_data, fullRank=T,sep = "_")
+test_data_dummy<-data.table(predict(test_data_dummy, newdata = test_data))
+
+names(test_data_dummy)<-gsub('-','_',names(test_data_dummy))
+
+# predict for test data
+test_set_scores <- predict(model_xgb0_tuned$finalModel, newdata = as.matrix(test_data_dummy[, !'price', with=F]))
+
+test_set_scores <- as.numeric(exp(test_set_scores)-1)
+
+final_submission <- data.frame("Id" = id_test, "price" = test_set_scores)
+
+write.csv(final_submission, file = "dominik_thausing_predictions.csv", row.names = FALSE) 
+
+```
